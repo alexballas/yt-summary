@@ -49,6 +49,7 @@ python3 yt.py --youtube <YOUTUBE_URL>
 To transcribe and summarize audio from a YouTube video:
 
 ```bash
+source venv/bin/activate
 python yt.py --youtube https://www.youtube.com/watch?v=example_video_id
 ```
 
