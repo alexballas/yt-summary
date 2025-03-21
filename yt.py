@@ -55,27 +55,36 @@ assistant_prompt = '<|assistant|>'
 prompt_suffix = '<|end|>'
 
 def process_audio_file(audio_file):
-    print(f"\n--- PROCESSING AUDIO FILE: {audio_file} ---")
-    
-    try:
-        audio, samplerate = sf.read(audio_file)
-        print(f"Audio loaded: {len(audio)/samplerate:.2f} seconds at {samplerate} Hz")
-    except Exception as e:
-        print(f"Error loading audio file: {e}")
-        return
-    
-    transcriptions = process_audio_in_chunks(audio, samplerate)
-    full_transcript = " ".join(transcriptions)
-    print("\n--- FULL TRANSCRIPT ---")
-    print(full_transcript)
+    file_path = "sum"
+
+    if os.path.exists(file_path):
+        with open(file_path, "r") as file:
+            full_transcript = file.read()
+            clean_text = remove_non_ascii(full_transcript)
+    else:
+        print(f"\n--- PROCESSING AUDIO FILE: {audio_file} ---")
+        
+        try:
+            audio, samplerate = sf.read(audio_file)
+            print(f"Audio loaded: {len(audio)/samplerate:.2f} seconds at {samplerate} Hz")
+        except Exception as e:
+            print(f"Error loading audio file: {e}")
+            return
+        
+        transcriptions = process_audio_in_chunks(audio, samplerate)
+        full_transcript = " ".join(transcriptions)
    
-    clean_text = remove_non_ascii(full_transcript) 
+        clean_text = remove_non_ascii(full_transcript) 
     
     print("\n--- SUMMARIZING ---")
-    summary = summarize_with_ollama(clean_text)
-   
-    print(summary)
 
+    if len(clean_text) > 100000:
+        parts = [clean_text[i:i+100000] for i in range(0, len(clean_text), 100000)]
+        summaries = [summarize_with_ollama(part) for part in parts]
+        combined = " ".join(summaries)
+        summary = summarize_with_ollama(combined, prompt="Combine the summaries into one:")
+    else:
+        summary = summarize_with_ollama(clean_text)
     
     return full_transcript, summary
 
@@ -114,19 +123,20 @@ def process_audio_in_chunks(audio, samplerate, chunk_seconds=20):
     
     return transcriptions
 
-def summarize_with_ollama(text):
+def summarize_with_ollama(text, prompt="Summarize this transcript for me, but keep all the section headings and key titles intact:"):
     globals().pop("model", None)
     torch.cuda.empty_cache()
     
     text_length = len(text)
-    ctx_options = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    
-    num_ctx = min(next((ctx for ctx in ctx_options if text_length <= ctx), 131072), 131072)
+    ctx_options = [8192, 16384, 32768, 65536, 131072]
+    print(text_length)
+
+    num_ctx = min(next((ctx for ctx in ctx_options if text_length+4000 <= ctx), 131072), 131072)
 
     url = "http://localhost:11434/api/generate"
     payload = {
         "model": "qwen2.5:latest",
-        "prompt": f"Summarize this transcript for me, but keep all the section headings and key titles intact:\n\n{text}",
+        "prompt": f"{prompt}\n\n{text}",
         "stream": False,
         "options": {
             "num_ctx": num_ctx
@@ -137,7 +147,8 @@ def summarize_with_ollama(text):
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         summary = response.json().get("response", "Summarization failed.")
-        return summary.replace("\\n", "\n")
+        final = summary.replace("\\n", "\n")
+        return final
     else:
         return f"Error: {response.status_code}, {response.text}"
 
@@ -164,5 +175,7 @@ if __name__ == "__main__":
                 exit(1)
             print(f"Using fallback audio file: {audio_file}")
     
-    process_audio_file(audio_file)
+    full, sum = process_audio_file(audio_file)
+    print(f"\n--- FULL TRANSCRIPT ---\n{full}")
+    print(f"\n--- SUMMARY ---\n{sum}")
     shutil.rmtree("./temp_audio")
