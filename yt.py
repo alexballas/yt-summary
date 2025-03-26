@@ -1,17 +1,34 @@
 import requests
 import torch
 import os
-import io
 import subprocess
-from PIL import Image
-import soundfile as sf
-import numpy as np
-import argparse
+import tempfile
 import shutil
-from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
-from urllib.request import urlopen
+import soundfile as sf
+import argparse
+import whisperx
 
-def extract_audio_from_youtube(youtube_url, output_dir="./temp_audio"):
+device = "cuda"
+batch_size = 32 # reduce if low on GPU mem
+compute_type = "float16"
+model = whisperx.load_model("large-v3-turbo", device, compute_type=compute_type)
+
+
+TEMP_DIR = os.path.join(tempfile.gettempdir(), "audio_processing")
+
+def cleanup_temp_directory():
+    if os.path.exists(TEMP_DIR):
+        print(f"Cleaning up temporary directory: {TEMP_DIR}")
+        try:
+            shutil.rmtree(TEMP_DIR)
+        except Exception as e:
+            print(f"Warning: Failed to clean up temporary directory: {e}")
+
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    print(f"Created temporary directory: {TEMP_DIR}")
+
+def extract_audio_from_youtube(youtube_url, output_dir=TEMP_DIR):
+    """Extract audio from YouTube URL and save to temporary directory"""
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "youtube_audio.%(ext)s")
 
@@ -38,43 +55,21 @@ def extract_audio_from_youtube(youtube_url, output_dir="./temp_audio"):
         print(f"Unexpected error: {e}")
         raise
 
-model_path = "microsoft/Phi-4-multimodal-instruct"
-processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
-    model_path, 
-    device_map="cuda", 
-    torch_dtype="auto", 
-    trust_remote_code=True, 
-    attn_implementation='flash_attention_2',
-).cuda()
-
-generation_config = GenerationConfig.from_pretrained(model_path)
-
-user_prompt = '<|user|>'
-assistant_prompt = '<|assistant|>'
-prompt_suffix = '<|end|>'
 
 def process_audio_file(audio_file):
-    file_path = "sum"
+    try:
+        audio, samplerate = sf.read(audio_file)
+        print(f"Audio loaded: {len(audio)/samplerate:.2f} seconds at {samplerate} Hz")
+    except Exception as e:
+        print(f"Error loading audio file: {e}")
+        return
 
-    if os.path.exists(file_path):
-        with open(file_path, "r") as file:
-            full_transcript = file.read()
-            clean_text = remove_non_ascii(full_transcript)
-    else:
-        print(f"\n--- PROCESSING AUDIO FILE: {audio_file} ---")
-        
-        try:
-            audio, samplerate = sf.read(audio_file)
-            print(f"Audio loaded: {len(audio)/samplerate:.2f} seconds at {samplerate} Hz")
-        except Exception as e:
-            print(f"Error loading audio file: {e}")
-            return
-        
-        transcriptions = process_audio_in_chunks(audio, samplerate)
-        full_transcript = " ".join(transcriptions)
-   
-        clean_text = remove_non_ascii(full_transcript) 
+    audio = whisperx.load_audio(audio_file)
+    result = model.transcribe(audio, batch_size=batch_size)
+    texts = [segment["text"] for segment in result["segments"]]
+    full_transcript = " ".join(texts)
+
+    clean_text = remove_non_ascii(full_transcript)
     
     print("\n--- SUMMARIZING ---")
 
@@ -88,43 +83,8 @@ def process_audio_file(audio_file):
     
     return full_transcript, summary
 
-def process_audio_in_chunks(audio, samplerate, chunk_seconds=20):
-    chunk_size = chunk_seconds * samplerate
-    num_chunks = int(np.ceil(len(audio) / chunk_size))
-    transcriptions = []
-    
-    print(f"Processing audio in {num_chunks} chunks of {chunk_seconds} seconds each")
-    
-    for i in range(num_chunks):
-        start_idx = i * chunk_size
-        end_idx = min(start_idx + chunk_size, len(audio))
-        chunk = audio[start_idx:end_idx]
-        
-        chunk_prompt = f'{user_prompt}<|audio_1|>Transcribe this audio chunk to text.{prompt_suffix}{assistant_prompt}'
-        
-        inputs = processor(text=chunk_prompt, audios=[(chunk, samplerate)], return_tensors='pt').to('cuda:0')
-        
-        torch.cuda.empty_cache()
-        
-        generate_ids = model.generate(
-            **inputs,
-            max_new_tokens=500,
-            generation_config=generation_config,
-        )
-        generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
-        response = processor.batch_decode(
-            generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
-        
-        transcriptions.append(response.strip())
-        print(f"Chunk {i+1} transcription: {response[:50]}...")
-        
-        torch.cuda.empty_cache()
-    
-    return transcriptions
 
 def summarize_with_ollama(text, prompt="Summarize this transcript for me, but keep all the section headings and key titles intact:"):
-    globals().pop("model", None)
     torch.cuda.empty_cache()
     
     text_length = len(text)
@@ -162,6 +122,8 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    cleanup_temp_directory()
+
     audio_file = args.audio
     
     if args.youtube:
@@ -175,7 +137,11 @@ if __name__ == "__main__":
                 exit(1)
             print(f"Using fallback audio file: {audio_file}")
     
-    full, sum = process_audio_file(audio_file)
-    print(f"\n--- FULL TRANSCRIPT ---\n{full}")
-    print(f"\n--- SUMMARY ---\n{sum}")
-    shutil.rmtree("./temp_audio")
+    try:
+        full, sum = process_audio_file(audio_file)
+        print(f"\n--- FULL TRANSCRIPT ---\n{full}")
+        print(f"\n--- SUMMARY ---\n{sum}")
+    finally:
+        if os.path.exists(TEMP_DIR):
+            print(f"Cleaning up temporary directory: {TEMP_DIR}")
+            shutil.rmtree(TEMP_DIR)
