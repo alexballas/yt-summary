@@ -158,7 +158,7 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h {mins}m {secs}s"
 
 
-def summarize_with_ollama(text, prompt="Summarize this transcript in English. Preserve structure with clear section headings and bullet points for key takeaways. Be faithful to the content; avoid inventing details.", num_ctx=65536, ollama_model: str = DEFAULT_OLLAMA_MODEL):
+def summarize_with_ollama(text, prompt="Summarize this transcript in English. Preserve structure with clear section headings and bullet points for key takeaways. Be faithful to the content; avoid inventing details. Be concise", num_ctx=65536, ollama_model: str = DEFAULT_OLLAMA_MODEL):
     torch.cuda.empty_cache()
     url = "http://localhost:11434/api/generate"
     payload = {
@@ -187,12 +187,18 @@ def _ollama_post_with_retry(url: str, payload: dict, retries: int = 3, timeout: 
             time.sleep(wait_time)
     return f"Error: {last_err}"
 
+_tiktoken_warned = False
+
 def estimate_tokens(text: str) -> int:
+    global _tiktoken_warned
     try:
         import tiktoken
         enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))
     except ImportError:
+        if not _tiktoken_warned:
+            print("Warning: tiktoken not installed. Using character-count fallback for token estimation.")
+            _tiktoken_warned = True
         return max(1, int(len(text) / 4))
 
 def split_text_token_aware(text: str, max_tokens: int, overlap_tokens: int = 400) -> List[str]:
